@@ -252,9 +252,11 @@
   .ans.correct, .ans.correct .ans-in { background: var(--ok); }
   .ans.correct .ans-in, .ans.correct .ans-in b { color: var(--ink-on-state); }
   .ans.correct.win { animation: flash .5s ease-in-out 2; }
-  .ans.wrong, .ans.wrong .ans-in { background: var(--bad); }
-  .ans.wrong .ans-in, .ans.wrong .ans-in b { color: var(--ink-on-state); }
-  .ans.wrong .ans-in span { text-decoration: line-through; text-decoration-thickness: 2px; }
+  .ans.wrong { background: var(--line); opacity: .6; }
+  .ans.wrong .ans-in { background: var(--panel); }
+  .ans.wrong .ans-in, .ans.wrong .ans-in b { color: var(--muted); }
+  .ans.wrong .ans-in span { text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--bad); }
+  .ans.wrong .ans-in::after { content: "\2715"; margin-left: auto; padding-left: 8px; color: var(--bad); font-weight: 600; font-size: 1.25rem; flex: none; }
   .ans.dim { opacity: .4; }
 
   .note {
@@ -412,7 +414,7 @@
         </div>
 
         <div class="note" id="wrongnote" hidden aria-live="polite">
-          <p><strong>Not that one!</strong>Another student can try.</p>
+          <p><strong>Not that one!</strong><span id="tries">Another student can try.</span></p>
           <button class="ghost-btn" id="giveup" type="button">Show the right answer</button>
         </div>
 
@@ -474,6 +476,8 @@
   var MAX = 50;
   var SAVE_KEY = 'cookie-quiz-questions';
   var LETTERS = 'ABCD';
+  var MAX_WRONG = 2;  // after this many wrong picks the answer is shown
+  var AUTO_NEXT = 5;  // seconds before moving on by itself
   var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // [question, correct, wrong, wrong, wrong]
   var EXAMPLES = [
@@ -498,12 +502,13 @@
   var s = freshState([]);
   var pendingConfirm = null;
   var lockTimer = null;
+  var autoTimer = null;
   var generating = false;
   var noAI = false;
   var samplePromise = window.claude && window.claude.use ? window.claude.use('sample').catch(function () { return null; }) : Promise.resolve(null);
 
   function freshState(qs) {
-    return { phase: 'setup', qs: qs, i: 0, scores: [], log: [], wrong: [], solved: false, done: false, gaveUp: false };
+    return { phase: 'setup', qs: qs, i: 0, scores: [], log: [], wrong: [], solved: false, done: false, gaveUp: false, outOfTries: false };
   }
 
   function load() {
@@ -796,7 +801,7 @@
 
   /* ---------- Game ---------- */
   function startGame(qs) {
-    clearTimeout(lockTimer); lockTimer = null;
+    clearTimeout(lockTimer); lockTimer = null; stopAuto();
     // a new random order of the four choices every game
     qs = qs.map(function (q) { return { q: q.q, a: q.a, w: q.w, order: shuffle([0, 1, 2, 3]) }; });
     s = freshState(qs);
@@ -869,6 +874,8 @@
     });
 
     $('wrongnote').hidden = reveal || s.wrong.length === 0;
+    var left = MAX_WRONG - s.wrong.length;
+    $('tries').textContent = 'Another student can try. ' + (left === 1 ? 'Last chance!' : left + ' chances left.');
     $('award').hidden = !s.solved || s.done;
     $('feedback').hidden = !s.done;
     $('skiprow').hidden = reveal;
@@ -897,7 +904,7 @@
         $('fb-line').textContent = p.n === 1 ? 'That is ' + last + '’s first cookie.' : last + ' now has ' + plural(p.n) + '.';
       } else {
         fb.className = 'feedback none';
-        $('fb-head').textContent = 'No cookie this time.';
+        $('fb-head').textContent = s.outOfTries ? MAX_WRONG + ' wrong answers. No cookie this time.' : 'No cookie this time.';
         $('fb-line').innerHTML = 'The right answer is <strong></strong>.';
         $('fb-line').querySelector('strong').textContent = LETTERS[q.order.indexOf(0)] + ': ' + q.a;
       }
@@ -924,6 +931,7 @@
         if (aw.getBoundingClientRect().bottom > window.innerHeight) aw.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'end' });
       } else {
         s.wrong.push(orig);
+        if (s.wrong.length >= MAX_WRONG) { outOfTries(); return; }
         renderPlay();
         var first = ansBtns.filter(function (b) { return !b.disabled; })[0];
         if (first) first.focus({ preventScroll: true });
@@ -949,6 +957,21 @@
   $('award').addEventListener('submit', function (e) { e.preventDefault(); award($('who').value); });
   $('who').addEventListener('input', function () { $('award-error').hidden = true; });
 
+  function stopAuto() { clearInterval(autoTimer); autoTimer = null; }
+
+  function outOfTries() {
+    s.outOfTries = true;
+    noWinner();
+    var left = AUTO_NEXT;
+    var label = $('next').textContent;
+    $('next').textContent = label + ' (' + left + ')';
+    autoTimer = setInterval(function () {
+      left -= 1;
+      if (left <= 0) { stopAuto(); $('next').click(); return; }
+      $('next').textContent = label + ' (' + left + ')';
+    }, 1000);
+  }
+
   function noWinner() {
     clearTimeout(lockTimer); lockTimer = null;
     s.log[s.i] = null;
@@ -961,6 +984,8 @@
   $('skip').addEventListener('click', noWinner);
 
   $('undo').addEventListener('click', function () {
+    stopAuto();
+    if (s.outOfTries) { s.outOfTries = false; s.wrong.pop(); } // take back the last wrong pick
     var name = s.log[s.i];
     if (name) {
       var p = findPlayer(name);
@@ -977,8 +1002,9 @@
   });
 
   $('next').addEventListener('click', function () {
+    stopAuto();
     if (s.i < s.qs.length - 1) {
-      s.i += 1; s.solved = false; s.done = false; s.gaveUp = false; s.wrong = [];
+      s.i += 1; s.solved = false; s.done = false; s.gaveUp = false; s.outOfTries = false; s.wrong = [];
       renderPlay();
       window.scrollTo(0, 0);
       ansBtns[0].focus({ preventScroll: true });
@@ -1025,7 +1051,7 @@
   /* ---------- Start over / new questions ---------- */
   function restart() { startGame(s.qs); }
   function newSet() {
-    clearTimeout(lockTimer); lockTimer = null;
+    clearTimeout(lockTimer); lockTimer = null; stopAuto();
     hideConfirm();
     show('setup');
     var first = $('qlist').querySelector('input');
